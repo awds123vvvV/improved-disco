@@ -17,7 +17,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            uuid: "0f86505f-6f0b-48d0-9ba3-f2574570d3c9".to_string(),
+            uuid: "351c9981-04b6-4103-aa4b-864aa9c91469".to_string(),
             addresses: vec![
                 "172.71.218.190".to_string(),
                 "104.16.123.96".to_string(),
@@ -73,8 +73,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             Response::error("KV Namespace CONFIG_KV Not Bound or Failed", 500)
         })
         .get_async("/sub/:uuid", |req, ctx| async move {
-            // 修复点 1：转换 &String 为 String
-            let req_uuid = ctx.param("uuid").cloned().unwrap_or_default();
+            // 核心修复点 1：将 &str 安全转换为 String，彻底解决 E0277 类型不匹配错误
+            let req_uuid = ctx.param("uuid").map(|s| s.to_string()).unwrap_or_default();
             
             let config = match ctx.kv("CONFIG_KV") {
                 Ok(kv) => kv.get("user_config").json::<AppConfig>().await.ok().flatten().unwrap_or_default(),
@@ -99,7 +99,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 }
             }
 
-            // 修复点 2：使用新版标准的 Base64 Engine 编码
+            // 核心修复点 2：消除 base64 弃用警告
             let plain_text = links.join("\n");
             let encoded_sub = base64::engine::general_purpose::STANDARD.encode(plain_text);
 
@@ -107,7 +107,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             headers.set("Content-Type", "text/plain; charset=utf-8")?;
             Ok(Response::ok(encoded_sub)?.with_headers(headers))
         })
-        // 修复点 3：去掉 & 引用符
+        // 核心修复点 3：移除 & 符号，按新版 API 直接传递 env 所有权 (解决 E0308 错误)
         .run(req, env)
         .await
 }
