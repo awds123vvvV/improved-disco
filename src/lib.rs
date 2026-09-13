@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
@@ -72,7 +73,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             Response::error("KV Namespace CONFIG_KV Not Bound or Failed", 500)
         })
         .get_async("/sub/:uuid", |req, ctx| async move {
-            let req_uuid = ctx.param("uuid").unwrap_or_default();
+            // 修复点 1：转换 &String 为 String
+            let req_uuid = ctx.param("uuid").cloned().unwrap_or_default();
             
             let config = match ctx.kv("CONFIG_KV") {
                 Ok(kv) => kv.get("user_config").json::<AppConfig>().await.ok().flatten().unwrap_or_default(),
@@ -97,13 +99,15 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 }
             }
 
+            // 修复点 2：使用新版标准的 Base64 Engine 编码
             let plain_text = links.join("\n");
-            let encoded_sub = base64::encode(plain_text);
+            let encoded_sub = base64::engine::general_purpose::STANDARD.encode(plain_text);
 
             let mut headers = Headers::new();
             headers.set("Content-Type", "text/plain; charset=utf-8")?;
             Ok(Response::ok(encoded_sub)?.with_headers(headers))
         })
-        .run(req, &env)
+        // 修复点 3：去掉 & 引用符
+        .run(req, env)
         .await
 }
