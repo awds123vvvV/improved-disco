@@ -5,7 +5,7 @@ use worker::*;
 
 const UUID_HEX: &str = "0f86505f-6f0b-48d0-9ba3-f2574570d3c9";
 const PROXY_IP: &str = "saas.sin.fan";
-const PROXY_PORT: u16 = 50001;
+const PROXY_PORT: u16 = 443;
 
 #[event(fetch)]
 pub async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
@@ -93,7 +93,7 @@ async fn handle_stream(ws: WebSocket) -> Result<()> {
                                     let _ = ws_clone.send_with_bytes(&buffer[..n]);
                                 }
                             }
-                            let _ = ws_clone.close(None, None);
+                            let _ = ws_clone.close::<&str>(None, None);
                         });
 
                         socket_writer = Some(writer);
