@@ -1,0 +1,12 @@
+[package]
+name = "vless-worker-rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+worker = "0.0.20" # Cloudflare Worker 官方 Rust SDK
+hex = "0.4"
+subtle = "2.5"     # 提供 Constant-time (防侧信道时序攻击) 比较
