@@ -1,11 +1,11 @@
 name = "cloverfull"
-main = "build/worker/index.js"
+main = "build/static/index.js"
 compatibility_date = "2024-01-01"
 
 [build]
 command = "cargo install worker-build && worker-build --release"
 
 # 如果使用 KV 存储配置，请取消下面两行的注释并填入你的 KV ID
- [[kv_namespaces]]
+ [kv_namespaces]
  binding = "CONFIG_KV"
  id = "clover"
