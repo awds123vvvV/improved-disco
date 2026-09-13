@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-// 编译期嵌入静态 UI 文件 (防路径与长文本错乱)
 const HTML_UI: &str = include_str!("../static/index.html");
 
-// 1. 配置项结构体
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub uuid: String,
@@ -18,7 +16,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            uuid: "351c9981-04b6-4103-aa4b-864aa9c91469".to_string(),
+            uuid: "0f86505f-6f0b-48d0-9ba3-f2574570d3c9".to_string(),
             addresses: vec![
                 "172.71.218.190".to_string(),
                 "104.16.123.96".to_string(),
@@ -32,7 +30,6 @@ impl Default for AppConfig {
     }
 }
 
-// 2. 节点拼装算法
 fn build_vless(uuid: &str, addr: &str, port: u16, host: &str, path: &str, remark: &str) -> String {
     format!(
         "vless://{}@{}:{}?encryption=none&security=tls&type=ws&host={}&path={}#{}",
@@ -47,27 +44,19 @@ fn build_trojan(uuid: &str, addr: &str, port: u16, host: &str, path: &str, remar
     )
 }
 
-// 3. Worker 主路由入口
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
     let router = Router::new();
 
     router
-        // 路由 1: 渲染前端 UI 页面
-        .get("/", |_, _| {
-            Response::from_html(HTML_UI)
-        })
-
-        // 路由 2: UI 读取配置 API
+        .get("/", |_, _| Response::from_html(HTML_UI))
         .get_async("/api/config", |_req, ctx| async move {
             let config = match ctx.kv("CONFIG_KV") {
-                Ok(kv) => kv.get("user_config").json::<AppConfig>().await?.unwrap_or_default(),
+                Ok(kv) => kv.get("user_config").json::<AppConfig>().await.ok().flatten().unwrap_or_default(),
                 Err(_) => AppConfig::default(),
             };
             Response::from_json(&config)
         })
-
-        // 路由 3: UI 保存配置 API
         .post_async("/api/config", |mut req, ctx| async move {
             let new_config: AppConfig = match req.json().await {
                 Ok(val) => val,
@@ -75,23 +64,21 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             };
 
             if let Ok(kv) = ctx.kv("CONFIG_KV") {
-                kv.put("user_config", &new_config)?.execute().await?;
-                Response::ok("Config saved successfully")
-            } else {
-                Response::error("KV Namespace CONFIG_KV Not Bound", 500)
+                if let Ok(put) = kv.put("user_config", &new_config) {
+                    let _ = put.execute().await;
+                    return Response::ok("Config saved successfully");
+                }
             }
+            Response::error("KV Namespace CONFIG_KV Not Bound or Failed", 500)
         })
-
-        // 路由 4: v2rayN 订阅拉取 API
         .get_async("/sub/:uuid", |req, ctx| async move {
             let req_uuid = ctx.param("uuid").unwrap_or_default();
             
             let config = match ctx.kv("CONFIG_KV") {
-                Ok(kv) => kv.get("user_config").json::<AppConfig>().await?.unwrap_or_default(),
+                Ok(kv) => kv.get("user_config").json::<AppConfig>().await.ok().flatten().unwrap_or_default(),
                 Err(_) => AppConfig::default(),
             };
 
-            // UUID 身份鉴权
             if req_uuid != config.uuid {
                 return Response::error("Unauthorized: Invalid UUID", 401);
             }
@@ -110,7 +97,6 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 }
             }
 
-            // 输出 v2rayN 识别的 Base64 字符串
             let plain_text = links.join("\n");
             let encoded_sub = base64::encode(plain_text);
 
