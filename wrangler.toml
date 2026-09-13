@@ -8,4 +8,4 @@ command = "cargo install worker-build && worker-build --release"
 # 如果使用 KV 存储配置，请取消下面两行的注释并填入你的 KV ID
 [[kv_namespaces]]
  binding = "CONFIG_KV"
- id = "clover"
+ id = "937bdcf82cfa49f78d98042aa0a289c4"
