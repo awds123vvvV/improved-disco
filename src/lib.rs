@@ -2,30 +2,26 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 use worker::*;
 
 // ============================================================
 // 全局常量与默认配置
 // ============================================================
 const DEFAULT_AUTH_TOKEN: &str = "351c9981-04b6-4103-aa4b-864aa9c91469";
-const DEFAULT_DNS: &str = "https://223.5.5.5/dns-query";
-const DEFAULT_ECH_DOMAIN: &str = "cloudflare-ech.com";
 
-// 官方直连地址池 (Base64 解码后)
 const OFFICIAL_DIRECT_IPS: &[&str] = &[
     "172.71.218.190", "162.158.228.87", "162.158.189.134", "162.158.26.63",
     "162.158.25.86", "162.158.29.216", "162.158.218.160", "162.158.227.214",
     "172.69.118.198", "172.69.119.150",
 ];
 
+fn b64_encode(input: &str) -> String {
+    BASE64.encode(input)
+}
+
 fn b64_decode(input: &str) -> String {
     let bytes = BASE64.decode(input).unwrap_or_default();
     String::from_utf8(bytes).unwrap_or_default()
-}
-
-fn b64_encode(input: &str) -> String {
-    BASE64.encode(input)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -105,27 +101,10 @@ impl Default for ConfigSnapshot {
     }
 }
 
-// 辅助校验函数
 fn is_truthy(val: &str, default_val: bool) -> bool {
     let t = val.trim().to_lowercase();
     if t.is_empty() { return default_val; }
-    match t.as_str() {
-        "yes" | "true" | "1" | "on" => true,
-        "no" | "false" | "0" | "off" => false,
-        _ => default_val,
-    }
-}
-
-fn is_valid_uuid(val: &str) -> bool {
-    let re = Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap();
-    re.is_match(val)
-}
-
-fn is_valid_address(val: &str) -> bool {
-    let ipv4 = Regex::new(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$").unwrap();
-    let ipv6 = Regex::new(r"^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$").unwrap();
-    let ipv6_omitted = Regex::new(r"^::1$|^::$|^(?:[0-9a-fA-F]{1,4}:)*::(?:[0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{1,4}$").unwrap();
-    ipv4.is_match(val) || ipv6.is_match(val) || ipv6_omitted.is_match(val)
+    matches!(t.as_str(), "yes" | "true" | "1" | "on")
 }
 
 struct ParsedAddress {
@@ -163,7 +142,7 @@ fn parse_address_port(input: &str) -> ParsedAddress {
 pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let mut config = ConfigSnapshot::default();
 
-    // 尝试从 Worker KV 读取持久化配置
+    // Worker 0.8.5 标准 KV 访问方式
     if let Ok(kv) = env.kv("C") {
         if let Ok(Some(val)) = kv.get("c").text().await {
             if let Ok(parsed) = serde_json::from_str::<ConfigSnapshot>(&val) {
@@ -172,33 +151,23 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         }
     }
 
-    // 从环境环境变量读取覆盖
-    let auth_token = env.var("u").or_else(|_| env.var("U")).map(|v| v.to_string()).unwrap_or_else(|_| DEFAULT_AUTH_TOKEN.to_string()).to_lowercase();
+    let auth_token = env.var("u").or_else(|_| env.var("U"))
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| DEFAULT_AUTH_TOKEN.to_string())
+        .to_lowercase();
+        
     let custom_path = config.d.clone();
     let path = req.path();
 
-    // 1. WebSocket 升级处理
+    // 1. WebSocket 升级支持
     if req.headers().get("Upgrade")?.unwrap_or_default() == "websocket" {
         let pair = WebSocketPair::new()?;
         let server = pair.server;
         server.accept()?;
-        
-        // 开启 Worker 原生 WebSocket 流转发处理
-        wasm_bindgen_futures::spawn_local(async move {
-            let mut event_stream = server.events().unwrap();
-            while let Some(event) = event_stream.next().await {
-                if let Ok(WebsocketEvent::Message(msg)) = event {
-                    if let Some(bytes) = msg.bytes() {
-                        // 此处执行完整的 VLESS/Trojan/SOCKS5 握手解包逻辑
-                        let _ = bytes; 
-                    }
-                }
-            }
-        });
         return Response::from_websocket(pair.client);
     }
 
-    // 2. API 接口响应
+    // 2. API 路由匹配
     if path.contains("/api/config") {
         return handle_api_config(req, &config, &env).await;
     }
@@ -218,16 +187,18 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         }));
     }
 
-    // 3. 订阅获取请求 (/sub 或者 /{UUID} 或 /{自定义路径})
+    // 3. 订阅路由匹配
     if path.ends_with("/sub") || path == format!("/{}", auth_token) || (!custom_path.is_empty() && path == format!("/{}", custom_path)) {
         return handle_subscription(req, &auth_token, &config).await;
     }
 
-    // 4. 自定义 Homepage 或者 默认终端 HTML 控制面板
+    // 4. 控制面板 HTML
     if path == "/" {
         if !config.homepage.trim().is_empty() {
-            if let Ok(resp) = Fetch::Url(config.homepage.trim().parse()?).send().await {
-                return Ok(resp);
+            if let Ok(url) = config.homepage.trim().parse() {
+                if let Ok(resp) = Fetch::Url(url).send().await {
+                    return Ok(resp);
+                }
             }
         }
         return Response::from_html(render_terminal_html(&custom_path));
@@ -239,7 +210,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 // ============================================================
 // API 配置处理
 // ============================================================
-async fn handle_api_config(req: Request, config: &ConfigSnapshot, env: &Env) -> Result<Response> {
+async fn handle_api_config(mut req: Request, config: &ConfigSnapshot, env: &Env) -> Result<Response> {
     if req.method() == Method::Post {
         let mut new_config = config.clone();
         if let Ok(json_body) = req.json::<serde_json::Value>().await {
@@ -251,8 +222,8 @@ async fn handle_api_config(req: Request, config: &ConfigSnapshot, env: &Env) -> 
         }
         if let Ok(kv) = env.kv("C") {
             let str_val = serde_json::to_string(&new_config).unwrap_or_default();
-            let _ = kv.put("c", str_val).unwrap().execute().await;
-            let _ = kv.put("c_ver", Date::now().to_string()).unwrap().execute().await;
+            let _ = kv.put("c", str_val)?.execute().await;
+            let _ = kv.put("c_ver", Date::now().to_string())?.execute().await;
         }
         return Response::from_json(&json!({"status": "success", "message": "配置更新成功"}));
     }
@@ -261,15 +232,14 @@ async fn handle_api_config(req: Request, config: &ConfigSnapshot, env: &Env) -> 
 }
 
 // ============================================================
-// 节点/订阅处理
+// 订阅节点生成逻辑
 // ============================================================
 async fn handle_subscription(req: Request, uuid: &str, config: &ConfigSnapshot) -> Result<Response> {
-    let host = req.url()?.host_str().unwrap_or("localhost").to_string();
+    let host = req.url()?.host().map(|h| h.to_string()).unwrap_or_else(|| "localhost".into());
     let user_agent = req.headers().get("User-Agent")?.unwrap_or_default().to_lowercase();
 
     let mut nodes = Vec::new();
-    
-    // 生成默认原生节点
+
     if is_truthy(&config.ev, true) {
         let vless_link = format!(
             "vless://{}@{}:443?encryption=none&security=tls&sni={}&type=ws&host={}&path={}#{}",
@@ -286,7 +256,6 @@ async fn handle_subscription(req: Request, uuid: &str, config: &ConfigSnapshot) 
         nodes.push(trojan_link);
     }
 
-    // 自定义优选节点解析
     if !config.yx.trim().is_empty() {
         for item in config.yx.split(',') {
             let item = item.trim();
@@ -311,22 +280,20 @@ async fn handle_subscription(req: Request, uuid: &str, config: &ConfigSnapshot) 
         }
     }
 
-    // 根据 User-Agent 进行订阅转换
     if user_agent.contains("clash") {
         let yaml_content = format!(
             "port: 7890\nallow-lan: true\nmode: rule\nproxies:\n{}",
             nodes.iter().map(|n| format!("  # node: {}", n)).collect::<Vec<_>>().join("\n")
         );
-        return Response::error(&yaml_content, 200);
+        return Response::ok(yaml_content);
     }
 
-    // 默认输出 Base64 纯文本订阅
     let encoded_sub = b64_encode(&nodes.join("\n"));
     Response::ok(encoded_sub)
 }
 
 // ============================================================
-// 赛博朋克 终端面板 HTML 前端模板 (与 JS 完全一致)
+// 终端 HTML 模版
 // ============================================================
 fn render_terminal_html(custom_path: &str) -> String {
     format!(
