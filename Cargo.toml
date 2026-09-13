@@ -1,5 +1,5 @@
 [package]
-name = "cf-v2ray-rust-full"
+name = "cloverfull"
 version = "0.1.0"
 edition = "2021"
 
