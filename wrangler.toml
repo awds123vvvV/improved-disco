@@ -1,4 +1,4 @@
-name = "vless-worker-rust"
+name = "clover-rust"
 main = "build/index.js"
 compatibility_date = "2024-01-01"
 
