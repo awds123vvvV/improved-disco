@@ -1,0 +1,6 @@
+name = "vless-worker-rust"
+main = "build/index.js"
+compatibility_date = "2024-01-01"
+
+[build]
+command = "worker-build --release"
