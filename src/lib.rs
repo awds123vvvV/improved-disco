@@ -1,5 +1,6 @@
 use subtle::ConstantTimeEq;
 use worker::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // 配置落脚点与密码 (UUID)
 const UUID_HEX: &str = "0f86505f-6f0b-48d0-9ba3-f2574570d3c9"; // 去除横杠的 32 位 hex
@@ -33,16 +34,15 @@ pub async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 
 async fn handle_stream(ws: WebSocket) -> Result<()> {
     let mut events = ws.events()?;
-    let mut socket_writer: Option<Socket> = None;
+    let mut socket_writer: Option<tokio::io::WriteHalf<Socket>> = None;
 
     while let Some(event) = events.next().await {
         match event? {
             WebsocketEvent::Message(msg) => {
                 if let Some(bytes) = msg.bytes() {
-                    if let Some(ref socket) = socket_writer {
+                    if let Some(ref mut writer) = socket_writer {
                         // 建立 Socket 连接后，后续流量直接透明转发
-                        let mut writer = socket.writer();
-                        writer.write_all(&bytes).await?;
+                        let _ = writer.write_all(&bytes).await;
                     } else {
                         // 首次数据包：解包 VLESS 报头并进行安全验证
                         if bytes.len() < 24 {
@@ -76,19 +76,17 @@ async fn handle_stream(ws: WebSocket) -> Result<()> {
                             return Ok(());
                         }
 
-                        // 4. 建立 TCP Socket 连接
+                        // 4. 建立 TCP Socket 连接并拆分读写流
                         let socket = Socket::builder().connect(PROXY_IP, PROXY_PORT)?;
-                        let mut writer = socket.writer();
-                        writer.write_all(&bytes[raw_data_idx..]).await?;
+                        let (mut reader, mut writer) = tokio::io::split(socket);
+                        let _ = writer.write_all(&bytes[raw_data_idx..]).await;
 
                         // 5. 启动异步反向回流 (Remote -> WebSocket)
                         let ws_clone = ws.clone();
-                        let reader = socket.reader();
                         let vless_version = bytes[0];
                         
                         wasm_bindgen_futures::spawn_local(async move {
                             let mut buffer = vec![0u8; 4096];
-                            let mut reader = reader;
                             let mut header_sent = false;
 
                             while let Ok(n) = reader.read(&mut buffer).await {
@@ -106,7 +104,7 @@ async fn handle_stream(ws: WebSocket) -> Result<()> {
                             let _ = ws_clone.close(None, None);
                         });
 
-                        socket_writer = Some(socket);
+                        socket_writer = Some(writer);
                     }
                 }
             }
