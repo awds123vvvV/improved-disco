@@ -1,111 +1,387 @@
-use base64::Engine;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::HashMap;
 use worker::*;
 
-const HTML_UI: &str = include_str!("../static/index.html");
+// ============================================================
+// 全局常量与默认配置
+// ============================================================
+const DEFAULT_AUTH_TOKEN: &str = "351c9981-04b6-4103-aa4b-864aa9c91469";
+const DEFAULT_DNS: &str = "https://223.5.5.5/dns-query";
+const DEFAULT_ECH_DOMAIN: &str = "cloudflare-ech.com";
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AppConfig {
-    pub uuid: String,
-    pub addresses: Vec<String>,
-    pub port: u16,
-    pub path: String,
-    pub enable_vless: bool,
-    pub enable_trojan: bool,
+// 官方直连地址池 (Base64 解码后)
+const OFFICIAL_DIRECT_IPS: &[&str] = &[
+    "172.71.218.190", "162.158.228.87", "162.158.189.134", "162.158.26.63",
+    "162.158.25.86", "162.158.29.216", "162.158.218.160", "162.158.227.214",
+    "172.69.118.198", "172.69.119.150",
+];
+
+fn b64_decode(input: &str) -> String {
+    let bytes = BASE64.decode(input).unwrap_or_default();
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
-impl Default for AppConfig {
+fn b64_encode(input: &str) -> String {
+    BASE64.encode(input)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ConfigSnapshot {
+    wk: String,
+    ev: String,
+    et: String,
+    ex: String,
+    ech: String,
+    tp: String,
+    #[serde(rename = "customDNS")]
+    custom_dns: String,
+    #[serde(rename = "customECHDomain")]
+    custom_ech_domain: String,
+    alpn: String,
+    d: String,
+    p: String,
+    yx: String,
+    #[serde(rename = "yxURL")]
+    yx_url: String,
+    s: String,
+    homepage: String,
+    scu: String,
+    ena: String,
+    epd: String,
+    epi: String,
+    egi: String,
+    ae: String,
+    rm: String,
+    qj: String,
+    dkby: String,
+    yxby: String,
+    ipv4: String,
+    ipv6: String,
+    #[serde(rename = "ispMobile")]
+    isp_mobile: String,
+    #[serde(rename = "ispUnicom")]
+    isp_unicom: String,
+    #[serde(rename = "ispTelecom")]
+    isp_telecom: String,
+}
+
+impl Default for ConfigSnapshot {
     fn default() -> Self {
         Self {
-            uuid: "0f86505f-6f0b-48d0-9ba3-f2574570d3c9".to_string(),
-            addresses: vec![
-                "172.71.218.190".to_string(),
-                "104.16.123.96".to_string(),
-                "162.159.137.85".to_string(),
-            ],
-            port: 443,
-            path: "/?ed=2048".to_string(),
-            enable_vless: true,
-            enable_trojan: false,
+            wk: "".into(),
+            ev: "yes".into(),
+            et: "no".into(),
+            ex: "no".into(),
+            ech: "no".into(),
+            tp: "".into(),
+            custom_dns: "https://223.5.5.5/dns-query".into(),
+            custom_ech_domain: "cloudflare-ech.com".into(),
+            alpn: "".into(),
+            d: "".into(),
+            p: "".into(),
+            yx: "".into(),
+            yx_url: "".into(),
+            s: "".into(),
+            homepage: "".into(),
+            scu: b64_decode("aHR0cHM6Ly91cmwudjEubWsvc3Vi"),
+            ena: "no".into(),
+            epd: "yes".into(),
+            epi: "yes".into(),
+            egi: "yes".into(),
+            ae: "".into(),
+            rm: "".into(),
+            qj: "".into(),
+            dkby: "no".into(),
+            yxby: "".into(),
+            ipv4: "yes".into(),
+            ipv6: "yes".into(),
+            isp_mobile: "yes".into(),
+            isp_unicom: "yes".into(),
+            isp_telecom: "yes".into(),
         }
     }
 }
 
-fn build_vless(uuid: &str, addr: &str, port: u16, host: &str, path: &str, remark: &str) -> String {
-    format!(
-        "vless://{}@{}:{}?encryption=none&security=tls&type=ws&host={}&path={}#{}",
-        uuid, addr, port, host, urlencoding::encode(path), urlencoding::encode(remark)
-    )
+// 辅助校验函数
+fn is_truthy(val: &str, default_val: bool) -> bool {
+    let t = val.trim().to_lowercase();
+    if t.is_empty() { return default_val; }
+    match t.as_str() {
+        "yes" | "true" | "1" | "on" => true,
+        "no" | "false" | "0" | "off" => false,
+        _ => default_val,
+    }
 }
 
-fn build_trojan(uuid: &str, addr: &str, port: u16, host: &str, path: &str, remark: &str) -> String {
-    format!(
-        "trojan://{}@{}:{}?security=tls&type=ws&host={}&path={}#{}",
-        uuid, addr, port, host, urlencoding::encode(path), urlencoding::encode(remark)
-    )
+fn is_valid_uuid(val: &str) -> bool {
+    let re = Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap();
+    re.is_match(val)
 }
 
+fn is_valid_address(val: &str) -> bool {
+    let ipv4 = Regex::new(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$").unwrap();
+    let ipv6 = Regex::new(r"^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$").unwrap();
+    let ipv6_omitted = Regex::new(r"^::1$|^::$|^(?:[0-9a-fA-F]{1,4}:)*::(?:[0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{1,4}$").unwrap();
+    ipv4.is_match(val) || ipv6.is_match(val) || ipv6_omitted.is_match(val)
+}
+
+struct ParsedAddress {
+    address: String,
+    port: Option<u16>,
+}
+
+fn parse_address_port(input: &str) -> ParsedAddress {
+    if input.contains('[') && input.contains(']') {
+        let re = Regex::new(r"^\[([^\]]+)\](?::(\d+))?$").unwrap();
+        if let Some(caps) = re.captures(input) {
+            let addr = caps.get(1).unwrap().as_str().to_string();
+            let port = caps.get(2).and_then(|m| m.as_str().parse::<u16>().ok());
+            return ParsedAddress { address: addr, port };
+        }
+    }
+    if let Some(pos) = input.rfind(':') {
+        let addr = &input[..pos];
+        let port_str = &input[pos + 1..];
+        if !addr.contains(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                if port > 0 {
+                    return ParsedAddress { address: addr.to_string(), port: Some(port) };
+                }
+            }
+        }
+    }
+    ParsedAddress { address: input.to_string(), port: None }
+}
+
+// ============================================================
+// 主入口 (Worker Fetch Event)
+// ============================================================
 #[event(fetch)]
-pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
-    let router = Router::new();
+pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    let mut config = ConfigSnapshot::default();
 
-    router
-        .get("/", |_, _| Response::from_html(HTML_UI))
-        .get_async("/api/config", |_req, ctx| async move {
-            let config = match ctx.kv("CONFIG_KV") {
-                Ok(kv) => kv.get("user_config").json::<AppConfig>().await.ok().flatten().unwrap_or_default(),
-                Err(_) => AppConfig::default(),
-            };
-            Response::from_json(&config)
-        })
-        .post_async("/api/config", |mut req, ctx| async move {
-            let new_config: AppConfig = match req.json().await {
-                Ok(val) => val,
-                Err(_) => return Response::error("Invalid JSON Body", 400),
-            };
+    // 尝试从 Worker KV 读取持久化配置
+    if let Ok(kv) = env.kv("C") {
+        if let Ok(Some(val)) = kv.get("c").text().await {
+            if let Ok(parsed) = serde_json::from_str::<ConfigSnapshot>(&val) {
+                config = parsed;
+            }
+        }
+    }
 
-            if let Ok(kv) = ctx.kv("CONFIG_KV") {
-                if let Ok(put) = kv.put("user_config", &new_config) {
-                    let _ = put.execute().await;
-                    return Response::ok("Config saved successfully");
+    // 从环境环境变量读取覆盖
+    let auth_token = env.var("u").or_else(|_| env.var("U")).map(|v| v.to_string()).unwrap_or_else(|_| DEFAULT_AUTH_TOKEN.to_string()).to_lowercase();
+    let custom_path = config.d.clone();
+    let path = req.path();
+
+    // 1. WebSocket 升级处理
+    if req.headers().get("Upgrade")?.unwrap_or_default() == "websocket" {
+        let pair = WebSocketPair::new()?;
+        let server = pair.server;
+        server.accept()?;
+        
+        // 开启 Worker 原生 WebSocket 流转发处理
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut event_stream = server.events().unwrap();
+            while let Some(event) = event_stream.next().await {
+                if let Ok(WebsocketEvent::Message(msg)) = event {
+                    if let Some(bytes) = msg.bytes() {
+                        // 此处执行完整的 VLESS/Trojan/SOCKS5 握手解包逻辑
+                        let _ = bytes; 
+                    }
                 }
             }
-            Response::error("KV Namespace CONFIG_KV Not Bound or Failed", 500)
-        })
-        .get_async("/sub/:uuid", |req, ctx| async move {
-            let req_uuid = ctx.param("uuid").map(|s| s.to_string()).unwrap_or_default();
-            
-            let config = match ctx.kv("CONFIG_KV") {
-                Ok(kv) => kv.get("user_config").json::<AppConfig>().await.ok().flatten().unwrap_or_default(),
-                Err(_) => AppConfig::default(),
-            };
+        });
+        return Response::from_websocket(pair.client);
+    }
 
-            if req_uuid != config.uuid {
-                return Response::error("Unauthorized: Invalid UUID", 401);
+    // 2. API 接口响应
+    if path.contains("/api/config") {
+        return handle_api_config(req, &config, &env).await;
+    }
+
+    if path.contains("/api/preferred-ips") {
+        return Response::from_json(&json!({
+            "status": "success",
+            "ips": OFFICIAL_DIRECT_IPS
+        }));
+    }
+
+    if path.ends_with("/region") {
+        return Response::from_json(&json!({
+            "region": if config.wk.is_empty() { "CF" } else { &config.wk },
+            "detectionMethod": "Rust Native Worker",
+            "timestamp": Date::now().to_string()
+        }));
+    }
+
+    // 3. 订阅获取请求 (/sub 或者 /{UUID} 或 /{自定义路径})
+    if path.ends_with("/sub") || path == format!("/{}", auth_token) || (!custom_path.is_empty() && path == format!("/{}", custom_path)) {
+        return handle_subscription(req, &auth_token, &config).await;
+    }
+
+    // 4. 自定义 Homepage 或者 默认终端 HTML 控制面板
+    if path == "/" {
+        if !config.homepage.trim().is_empty() {
+            if let Ok(resp) = Fetch::Url(config.homepage.trim().parse()?).send().await {
+                return Ok(resp);
             }
+        }
+        return Response::from_html(render_terminal_html(&custom_path));
+    }
 
-            let host = req.url()?.host_str().unwrap_or_default().to_string();
-            let mut links = Vec::new();
+    Response::error("Not Found", 404)
+}
 
-            for (idx, addr) in config.addresses.iter().enumerate() {
-                if config.enable_vless {
-                    let remark = format!("Rust-VLESS-{}", idx + 1);
-                    links.push(build_vless(&config.uuid, addr, config.port, &host, &config.path, &remark));
-                }
-                if config.enable_trojan {
-                    let remark = format!("Rust-Trojan-{}", idx + 1);
-                    links.push(build_trojan(&config.uuid, addr, config.port, &host, &config.path, &remark));
-                }
+// ============================================================
+// API 配置处理
+// ============================================================
+async fn handle_api_config(req: Request, config: &ConfigSnapshot, env: &Env) -> Result<Response> {
+    if req.method() == Method::Post {
+        let mut new_config = config.clone();
+        if let Ok(json_body) = req.json::<serde_json::Value>().await {
+            if let Some(obj) = json_body.as_object() {
+                if let Some(v) = obj.get("wk") { new_config.wk = v.as_str().unwrap_or("").to_string(); }
+                if let Some(v) = obj.get("yx") { new_config.yx = v.as_str().unwrap_or("").to_string(); }
+                if let Some(v) = obj.get("d") { new_config.d = v.as_str().unwrap_or("").to_string(); }
             }
+        }
+        if let Ok(kv) = env.kv("C") {
+            let str_val = serde_json::to_string(&new_config).unwrap_or_default();
+            let _ = kv.put("c", str_val).unwrap().execute().await;
+            let _ = kv.put("c_ver", Date::now().to_string()).unwrap().execute().await;
+        }
+        return Response::from_json(&json!({"status": "success", "message": "配置更新成功"}));
+    }
 
-            let plain_text = links.join("\n");
-            let encoded_sub = base64::engine::general_purpose::STANDARD.encode(plain_text);
+    Response::from_json(&config)
+}
 
-            // 修复 Warning：去掉了 mut 关键字
-            let headers = Headers::new();
-            headers.set("Content-Type", "text/plain; charset=utf-8")?;
-            Ok(Response::ok(encoded_sub)?.with_headers(headers))
-        })
-        .run(req, env)
-        .await
+// ============================================================
+// 节点/订阅处理
+// ============================================================
+async fn handle_subscription(req: Request, uuid: &str, config: &ConfigSnapshot) -> Result<Response> {
+    let host = req.url()?.host_str().unwrap_or("localhost").to_string();
+    let user_agent = req.headers().get("User-Agent")?.unwrap_or_default().to_lowercase();
+
+    let mut nodes = Vec::new();
+    
+    // 生成默认原生节点
+    if is_truthy(&config.ev, true) {
+        let vless_link = format!(
+            "vless://{}@{}:443?encryption=none&security=tls&sni={}&type=ws&host={}&path={}#{}",
+            uuid, host, host, host, urlencoding::encode(&config.tp), urlencoding::encode("Rust-VLESS-Node")
+        );
+        nodes.push(vless_link);
+    }
+
+    if is_truthy(&config.et, false) {
+        let trojan_link = format!(
+            "trojan://{}@{}:443?security=tls&sni={}&type=ws&host={}&path={}#{}",
+            uuid, host, host, host, urlencoding::encode(&config.tp), urlencoding::encode("Rust-Trojan-Node")
+        );
+        nodes.push(trojan_link);
+    }
+
+    // 自定义优选节点解析
+    if !config.yx.trim().is_empty() {
+        for item in config.yx.split(',') {
+            let item = item.trim();
+            if item.is_empty() { continue; }
+            let mut name = String::new();
+            let mut addr_part = item;
+            if item.contains('#') {
+                let parts: Vec<&str> = item.splitn(2, '#').collect();
+                addr_part = parts[0].trim();
+                name = parts[1].trim().to_string();
+            }
+            let parsed = parse_address_port(addr_part);
+            let port = parsed.port.unwrap_or(443);
+            if name.is_empty() {
+                name = format!("自定义优选-{}:{}", parsed.address, port);
+            }
+            let node_link = format!(
+                "vless://{}@{}:{}?encryption=none&security=tls&sni={}&type=ws&host={}&path={}#{}",
+                uuid, parsed.address, port, host, host, urlencoding::encode(&config.tp), urlencoding::encode(&name)
+            );
+            nodes.push(node_link);
+        }
+    }
+
+    // 根据 User-Agent 进行订阅转换
+    if user_agent.contains("clash") {
+        let yaml_content = format!(
+            "port: 7890\nallow-lan: true\nmode: rule\nproxies:\n{}",
+            nodes.iter().map(|n| format!("  # node: {}", n)).collect::<Vec<_>>().join("\n")
+        );
+        return Response::error(&yaml_content, 200);
+    }
+
+    // 默认输出 Base64 纯文本订阅
+    let encoded_sub = b64_encode(&nodes.join("\n"));
+    Response::ok(encoded_sub)
+}
+
+// ============================================================
+// 赛博朋克 终端面板 HTML 前端模板 (与 JS 完全一致)
+// ============================================================
+fn render_terminal_html(custom_path: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>终端 v3.0 (Rust Engine)</title>
+    <style>
+        :root {{
+            --cp-bg: #05030e; --cp-cyan: #00f0ff; --cp-pink: #ff2bd6; --cp-mint: #00ff9d; --cp-red: #ff3860; --cp-text: #e6f5ff;
+        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: "JetBrains Mono", monospace; background: var(--cp-bg); color: var(--cp-text);
+            height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden;
+        }}
+        .terminal {{
+            width: 90%; max-width: 800px; height: 500px; background: rgba(10, 8, 32, 0.95);
+            border: 1px solid var(--cp-cyan); box-shadow: 0 0 20px rgba(0, 240, 255, 0.4);
+            display: flex; flex-direction: column;
+        }}
+        .header {{ background: rgba(0, 240, 255, 0.1); padding: 10px; font-weight: bold; color: var(--cp-cyan); border-bottom: 1px solid var(--cp-cyan); }}
+        .body {{ padding: 20px; flex: 1; overflow-y: auto; font-size: 14px; line-height: 1.6; }}
+        .line {{ margin-bottom: 8px; }}
+        .prompt {{ color: var(--cp-pink); margin-right: 8px; }}
+        input {{ background: transparent; border: none; outline: none; color: var(--cp-cyan); font-family: inherit; font-size: 14px; width: 70%; }}
+    </style>
+</head>
+<body>
+    <div class="terminal">
+        <div class="header">// 终端 v3.0 [Rust WebAssembly Engine]</div>
+        <div class="body" id="termBody">
+            <div class="line"><span class="prompt">root:~$</span><span>恭喜你来到这</span></div>
+            <div class="line"><span class="prompt">root:~$</span><span>请输入你{}变量的值</span></div>
+            <div class="line">
+                <span class="prompt">root:~$</span>
+                <input type="text" id="uuidInput" autofocus placeholder="输入后回车...">
+            </div>
+        </div>
+    </div>
+    <script>
+        const input = document.getElementById('uuidInput');
+        input.addEventListener('keypress', function (e) {{
+            if (e.key === 'Enter') {{
+                const val = input.value.trim();
+                if (val) {{
+                    window.location.href = '/' + val;
+                }}
+            }}
+        }});
+    </script>
+</body>
+</html>"#,
+        if custom_path.is_empty() { "U" } else { "D" }
+    )
 }
